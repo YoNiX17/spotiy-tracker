@@ -129,12 +129,12 @@ export async function saveListeningEntry(userId: string, entry: ListeningEntry) 
     }
 }
 
-// Save multiple listening entries (batch)
+// Save multiple listening entries (batch) - OPTIMIZED for performance
 export async function saveListeningHistory(userId: string, entries: ListeningEntry[]) {
     if (entries.length === 0) return;
 
     try {
-        // Get existing entries to avoid duplicates
+        // Get existing entries to avoid duplicates (only fetch played_at for efficiency)
         const existingRecords = await pb.collection('spotify_history').getFullList({
             filter: `user_id = "${userId}"`,
             fields: 'played_at',
@@ -144,11 +144,27 @@ export async function saveListeningHistory(userId: string, entries: ListeningEnt
             existingRecords.map(r => new Date(r.played_at).getTime())
         );
 
-        let newCount = 0;
-        for (const entry of entries) {
+        // Filter out duplicates first
+        const newEntries = entries.filter(entry => {
             const timestamp = new Date(entry.played_at).getTime();
-            if (!existingTimestamps.has(timestamp)) {
-                await pb.collection('spotify_history').create({
+            return !existingTimestamps.has(timestamp);
+        });
+
+        if (newEntries.length === 0) {
+            console.log('No new entries to save');
+            return;
+        }
+
+        // Insert in parallel batches of 50 for much better performance
+        const BATCH_SIZE = 50;
+        let savedCount = 0;
+
+        for (let i = 0; i < newEntries.length; i += BATCH_SIZE) {
+            const batch = newEntries.slice(i, i + BATCH_SIZE);
+            
+            // Execute all inserts in parallel
+            await Promise.all(batch.map(entry =>
+                pb.collection('spotify_history').create({
                     user_id: userId,
                     track_id: entry.trackId,
                     track_name: entry.trackName,
@@ -158,16 +174,17 @@ export async function saveListeningHistory(userId: string, entries: ListeningEnt
                     duration_ms: entry.duration_ms,
                     played_at: entry.played_at,
                     spotify_url: entry.spotifyUrl,
-                });
-                newCount++;
-            }
+                })
+            ));
+
+            savedCount += batch.length;
+            console.log(`Progress: ${savedCount}/${newEntries.length} entries saved`);
         }
 
-        if (newCount > 0) {
-            console.log(`✅ Saved ${newCount} new listening entries`);
-        }
+        console.log(`✅ Saved ${savedCount} new listening entries`);
     } catch (error) {
         console.error('Error saving listening history:', error);
+        throw error; // Re-throw to show error in UI
     }
 }
 
